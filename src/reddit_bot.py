@@ -37,6 +37,15 @@ class RedditBot:
             log(f"Failed to register with Controller: {e}")
             raise
 
+    def is_maintenance_mode(self):
+      try:
+          response = requests.get(f"{CONTROLLER_URL}/maintenance/status")
+          return response.json().get("maintenance", False)
+      except Exception as e:
+          log(f"Error checking maintenance: {e}")
+          return False
+
+      
     def fetch_tasks(self):
         """Fetch tasks from the Controller."""
         try:
