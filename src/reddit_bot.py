@@ -109,8 +109,12 @@ class RedditBot:
         """Main loop: fetch tasks, process them, and mimic human behavior."""
         log("Reddit Bot started")
         while True:
-            tasks = self.fetch_tasks()
-            for task in tasks:
+            if self.is_maintenance_mode():
+               log("Maintenance mode enabled. Sleeping...")
+               time.sleep(60)
+               continue
+              tasks = self.fetch_tasks()
+              for task in tasks:
                 subreddit_name = task.get("subreddit")
                 promotion_link = task.get("promotion_link")
                 try:
