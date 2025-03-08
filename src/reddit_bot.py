@@ -4,9 +4,10 @@ import threading
 import time
 from config import *
 from utils import log, random_delay, random_action
-from captcha_solver import CaptchaSolver
 from engagement_tracker import EngagementTracker
 from huggingface_hub import InferenceClient
+import pytesseract
+from PIL import Image
 
 class RedditBot:
     def __init__(self):
@@ -17,7 +18,6 @@ class RedditBot:
             password=REDDIT_PASSWORD,
             user_agent="reddit-super-manager-bot"
         )
-        self.captcha_solver = CaptchaSolver()
         self.tracker = EngagementTracker()
         self.hf_client = InferenceClient(model=HUGGINGFACE_MODEL, token=HUGGINGFACE_API_KEY)
         self.start_time = time.time()
@@ -38,14 +38,13 @@ class RedditBot:
             raise
 
     def is_maintenance_mode(self):
-      try:
-          response = requests.get(f"{CONTROLLER_URL}/maintenance/status")
-          return response.json().get("maintenance", False)
-      except Exception as e:
-          log(f"Error checking maintenance: {e}")
-          return False
+        try:
+            response = requests.get(f"{CONTROLLER_URL}/maintenance/status")
+            return response.json().get("maintenance", False)
+        except Exception as e:
+            log(f"Error checking maintenance: {e}")
+            return False
 
-      
     def fetch_tasks(self):
         """Fetch tasks from the Controller."""
         try:
@@ -69,6 +68,17 @@ class RedditBot:
             log(f"Failed to generate comment: {e}")
             return f"Nice post! Check this out: {promotion_link}"
 
+    def solve_captcha_with_tesseract(self, image_path):
+        """Solve a text-based CAPTCHA using Tesseract OCR."""
+        try:
+            image = Image.open(image_path)
+            text = pytesseract.image_to_string(image, config='--psm 8')  # Single word mode
+            log(f"Tesseract CAPTCHA solution: {text.strip()}")
+            return text.strip()
+        except Exception as e:
+            log(f"Failed to solve CAPTCHA with Tesseract: {e}")
+            return ""
+
     def post_comment(self, submission, comment_text):
         """Post a comment on Reddit, handling captchas if needed."""
         try:
@@ -77,16 +87,41 @@ class RedditBot:
             self.tracker.add_comment(comment.id)
             self.report_status("comment_posted", {"comment_id": comment.id})
         except praw.exceptions.APIException as e:
-            if "CAPTCHA" in str(e):
-                log("Captcha required, attempting to solve")
-                captcha_solution = self.captcha_solver.solve({"url": submission.permalink, "sitekey": "reddit-sitekey"})
-                log(f"Captcha solution: {captcha_solution}")
-                # PRAW doesn't support captcha submission natively; this is a limitation
-                # In practice, you'd need to use Reddit's raw API or manual intervention
-                raise Exception("Captcha solving not implemented in PRAW")
+            if "BAD_CAPTCHA" in str(e):
+                log("CAPTCHA required, attempting to solve")
+                # Get a new CAPTCHA ID
+                captcha_response = self.reddit.request('POST', '/api/new_captcha')
+                captcha_id = captcha_response.get('json', {}).get('data', {}).get('iden')
+                if not captcha_id:
+                    raise Exception("Failed to get CAPTCHA ID")
+                # Download the CAPTCHA image
+                captcha_url = f"https://www.reddit.com/captcha/{captcha_id}.png"
+                response = requests.get(captcha_url)
+                with open('captcha.png', 'wb') as f:
+                    f.write(response.content)
+                # Solve the CAPTCHA with Tesseract
+                captcha_solution = self.solve_captcha_with_tesseract('captcha.png')
+                if not captcha_solution:
+                    raise Exception("Failed to solve CAPTCHA")
+                # Retry posting the comment with CAPTCHA solution
+                comment_data = {
+                    'thing_id': submission.fullname,
+                    'text': comment_text,
+                    'iden': captcha_id,
+                    'captcha': captcha_solution
+                }
+                response = self.reddit.request('POST', '/api/comment', data=comment_data)
+                if response.get('json', {}).get('errors'):
+                    raise Exception(f"Failed to post comment with CAPTCHA: {response['json']['errors']}")
+                log("Comment posted successfully with CAPTCHA solution")
+                # Extract comment ID from response
+                comment_id = response.get('json', {}).get('data', {}).get('things', [{}])[0].get('id')
+                if comment_id:
+                    self.tracker.add_comment(comment_id)
+                    self.report_status("comment_posted", {"comment_id": comment_id})
             else:
                 log(f"Failed to post comment: {e}")
-                raise
+                self.report_status("comment_failed", {"error": str(e)})
 
     def report_status(self, status, data):
         """Report status to the Controller."""
@@ -110,11 +145,11 @@ class RedditBot:
         log("Reddit Bot started")
         while True:
             if self.is_maintenance_mode():
-               log("Maintenance mode enabled. Sleeping...")
-               time.sleep(60)
-               continue
-              tasks = self.fetch_tasks()
-              for task in tasks:
+                log("Maintenance mode enabled. Sleeping...")
+                time.sleep(60)
+                continue
+            tasks = self.fetch_tasks()
+            for task in tasks:
                 subreddit_name = task.get("subreddit")
                 promotion_link = task.get("promotion_link")
                 try:
