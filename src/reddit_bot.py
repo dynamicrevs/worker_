@@ -2,6 +2,10 @@ import praw
 import requests
 import threading
 import time
+import sys
+import os
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(parent_dir)
 from config import *
 from utils import log, random_delay, random_action
 from engagement_tracker import EngagementTracker
