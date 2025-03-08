@@ -2,7 +2,7 @@ import praw
 import requests
 import threading
 import time
-from config import *
+from ./config/config import *
 from utils import log, random_delay, random_action
 from engagement_tracker import EngagementTracker
 from huggingface_hub import InferenceClient
