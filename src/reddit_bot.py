@@ -79,49 +79,66 @@ class RedditBot:
             log(f"Failed to solve CAPTCHA with Tesseract: {e}")
             return ""
 
-    def post_comment(self, submission, comment_text):
-        """Post a comment on Reddit, handling captchas if needed."""
+def post_comment(self, submission, comment_text):
+    """Post a comment on Reddit, handling CAPTCHAs automatically if needed."""
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
+            # Attempt to post the comment using PRAW's reply method
             comment = submission.reply(comment_text)
             log(f"Posted comment ID: {comment.id}")
             self.tracker.add_comment(comment.id)
             self.report_status("comment_posted", {"comment_id": comment.id})
+            return  # Success, exit the method
         except praw.exceptions.APIException as e:
             if "BAD_CAPTCHA" in str(e):
-                log("CAPTCHA required, attempting to solve")
-                # Get a new CAPTCHA ID
-                captcha_response = self.reddit.request('POST', '/api/new_captcha')
-                captcha_id = captcha_response.get('json', {}).get('data', {}).get('iden')
-                if not captcha_id:
-                    raise Exception("Failed to get CAPTCHA ID")
-                # Download the CAPTCHA image
-                captcha_url = f"https://www.reddit.com/captcha/{captcha_id}.png"
-                response = requests.get(captcha_url)
-                with open('captcha.png', 'wb') as f:
-                    f.write(response.content)
-                # Solve the CAPTCHA with Tesseract
-                captcha_solution = self.solve_captcha_with_tesseract('captcha.png')
-                if not captcha_solution:
-                    raise Exception("Failed to solve CAPTCHA")
-                # Retry posting the comment with CAPTCHA solution
-                comment_data = {
-                    'thing_id': submission.fullname,
-                    'text': comment_text,
-                    'iden': captcha_id,
-                    'captcha': captcha_solution
-                }
-                response = self.reddit.request('POST', '/api/comment', data=comment_data)
-                if response.get('json', {}).get('errors'):
-                    raise Exception(f"Failed to post comment with CAPTCHA: {response['json']['errors']}")
-                log("Comment posted successfully with CAPTCHA solution")
-                # Extract comment ID from response
-                comment_id = response.get('json', {}).get('data', {}).get('things', [{}])[0].get('id')
-                if comment_id:
-                    self.tracker.add_comment(comment_id)
-                    self.report_status("comment_posted", {"comment_id": comment_id})
+                log(f"CAPTCHA required, attempting to solve (Attempt {attempt + 1}/{max_retries})")
+                try:
+                    # Step 1: Fetch a new CAPTCHA ID from Reddit's API
+                    captcha_response = self.reddit.request('POST', '/api/new_captcha')
+                    captcha_id = captcha_response.get('json', {}).get('data', {}).get('iden')
+                    if not captcha_id:
+                        raise Exception("Failed to get CAPTCHA ID")
+
+                    # Step 2: Download the CAPTCHA image in memory
+                    captcha_url = f"https://www.reddit.com/captcha/{captcha_id}.png"
+                    response = requests.get(captcha_url)
+                    image_data = BytesIO(response.content)
+
+                    # Step 3: Solve the CAPTCHA using Tesseract OCR
+                    image = Image.open(image_data)
+                    captcha_solution = pytesseract.image_to_string(image, config='--psm 8').strip()
+                    if not captcha_solution:
+                        log("Tesseract failed to extract text from CAPTCHA")
+                        continue  # Retry if solution is empty
+
+                    # Step 4: Submit the comment with CAPTCHA solution using raw API
+                    comment_data = {
+                        'thing_id': submission.fullname,
+                        'text': comment_text,
+                        'iden': captcha_id,
+                        'captcha': captcha_solution
+                    }
+                    response = self.reddit.request('POST', '/api/comment', data=comment_data)
+                    if response.get('json', {}).get('errors'):
+                        raise Exception(f"Failed to post comment with CAPTCHA: {response['json']['errors']}")
+
+                    # Step 5: Extract comment ID from the raw API response
+                    comment_id = response.get('json', {}).get('data', {}).get('things', [{}])[0].get('id')
+                    if comment_id:
+                        self.tracker.add_comment(comment_id)
+                        self.report_status("comment_posted", {"comment_id": comment_id})
+                        return  # Success, exit the method
+                except Exception as captcha_error:
+                    log(f"CAPTCHA solving failed: {captcha_error}")
+                    if attempt == max_retries - 1:
+                        raise Exception("Failed to solve CAPTCHA after multiple attempts")
             else:
+                # Handle non-CAPTCHA API exceptions
                 log(f"Failed to post comment: {e}")
                 self.report_status("comment_failed", {"error": str(e)})
+                raise
+
 
     def report_status(self, status, data):
         """Report status to the Controller."""
